@@ -41,7 +41,7 @@ Experience = TypeVar("Experience", bound=chex.ArrayTree)
 
 
 @dataclass(frozen=True)
-class TrajectoryBufferState(Generic[Experience]):
+class TrainValTrajectoryBufferState(Generic[Experience]):
     """State of the  trajectory replay buffer.
 
     Attributes:
@@ -75,7 +75,7 @@ def init(
     max_length_time_axis: int,
     val_size: float,
     seed: int = 0
-) -> TrajectoryBufferState[Experience]:
+) -> TrainValTrajectoryBufferState[Experience]:
     """
     Initialise the buffer state.
 
@@ -112,7 +112,7 @@ def init(
     train_indices = jnp.array(train_indices, dtype=int)
     val_indices = jnp.array(val_indices, dtype=int)
 
-    state = TrajectoryBufferState(
+    state = TrainValTrajectoryBufferState(
         experience=experience,
         is_full=jnp.array(False, dtype=bool),
         current_index=jnp.array(0),
@@ -123,9 +123,9 @@ def init(
 
 
 def add(
-    state: TrajectoryBufferState[Experience],
+    state: TrainValTrajectoryBufferState[Experience],
     batch: Experience,
-) -> TrajectoryBufferState[Experience]:
+) -> TrainValTrajectoryBufferState[Experience]:
     """
     Add a batch of experience to the buffer state. Assumes that this carries on from the episode
     where the previous added batch of experience ended. For example, if we consider a single
@@ -184,7 +184,7 @@ def add(
 
 
 def get_invalid_indices(
-    state: TrajectoryBufferState[Experience],
+    state: TrainValTrajectoryBufferState[Experience],
     sample_sequence_length: int,
     period: int,
     add_batch_size: int,
@@ -267,7 +267,7 @@ def get_invalid_indices(
 
 
 def calculate_uniform_item_indices(
-    state: TrajectoryBufferState[Experience],
+    state: TrainValTrajectoryBufferState[Experience],
     rng_key: chex.PRNGKey,
     batch_size: int,
     sample_sequence_length: int,
@@ -344,13 +344,10 @@ def calculate_uniform_item_indices(
     # we can get the offset by taking the last item index and adding one.
     # time_offset = invalid_item_indices[-1] + 1
 
-    # For the train set, we consider all train indices < upper_bound
-    valid_indices = indices[indices < upper_bound]
-
-    # We then sample item indices 
-    sampled_item_time_indices = jax.random.choice(
-        rng_key, valid_indices, (batch_size,)
-    )
+    mask = indices < upper_bound  # Boolean mask
+    probabilities = mask.astype(jnp.float32) / jnp.sum(mask)
+    
+    sampled_item_time_indices = jax.random.choice(rng_key, indices, shape=(batch_size,), p=probabilities)
 
     # We then add the offset and modulo the indices to ensure that they are within
     # the bounds of the item array (which doesnt actually exist). We modulo by the
@@ -378,7 +375,7 @@ def calculate_uniform_item_indices(
 
 
 def sample(
-    state: TrajectoryBufferState[Experience],
+    state: TrainValTrajectoryBufferState[Experience],
     rng_key: chex.PRNGKey,
     batch_size: int,
     sequence_length: int,
@@ -443,7 +440,7 @@ def sample(
 
 
 def sample_train(
-    state: TrajectoryBufferState[Experience],
+    state: TrainValTrajectoryBufferState[Experience],
     rng_key: chex.PRNGKey,
     batch_size: int,
     sequence_length: int,
@@ -507,7 +504,7 @@ def sample_train(
     return TrajectoryBufferSample(experience=batch_trajectory)
 
 def sample_val(
-    state: TrajectoryBufferState[Experience],
+    state: TrainValTrajectoryBufferState[Experience],
     rng_key: chex.PRNGKey,
     batch_size: int,
     sequence_length: int,
@@ -571,7 +568,7 @@ def sample_val(
     return TrajectoryBufferSample(experience=batch_trajectory)
 
 def can_sample(
-    state: TrajectoryBufferState[Experience], min_length_time_axis: int
+    state: TrainValTrajectoryBufferState[Experience], min_length_time_axis: int
 ) -> Array:
     """Indicates whether the buffer has been filled above the minimum length, such that it
     may be sampled from."""
@@ -579,7 +576,7 @@ def can_sample(
 
 
 def can_sample_train(
-    state: TrajectoryBufferState[Experience], min_length_time_axis: int
+    state: TrainValTrajectoryBufferState[Experience], min_length_time_axis: int
 ) -> Array:
     """Indicates whether the buffer has been filled above the minimum length, such that it
     may be sampled from."""
@@ -588,7 +585,7 @@ def can_sample_train(
     return state.is_full | _can_sample_train
 
 def can_sample_val(
-    state: TrajectoryBufferState[Experience], min_length_time_axis: int
+    state: TrainValTrajectoryBufferState[Experience], min_length_time_axis: int
 ) -> Array:
     """Indicates whether the buffer has been filled above the minimum length, such that it
     may be sampled from."""
@@ -597,7 +594,7 @@ def can_sample_val(
     return state.is_full | _can_sample_val
 
 
-BufferState = TypeVar("BufferState", bound=TrajectoryBufferState)
+BufferState = TypeVar("BufferState", bound=TrainValTrajectoryBufferState)
 BufferSample = TypeVar("BufferSample", bound=TrajectoryBufferSample)
 
 

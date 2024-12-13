@@ -21,7 +21,7 @@ from flashbax.buffers.train_val_trajectory_buffer import (
     Experience,
     TrainValTrajectoryBuffer,
     TrajectoryBufferSample,
-    TrajectoryBufferState,
+    TrainValTrajectoryBufferState,
     make_train_val_trajectory_buffer,
 )
 from flashbax.utils import add_dim_to_args
@@ -87,8 +87,8 @@ def create_item_buffer(
     )
 
     def add_fn(
-        state: TrajectoryBufferState, batch: Experience
-    ) -> TrajectoryBufferState[Experience]:
+        state: TrainValTrajectoryBufferState, batch: Experience
+    ) -> TrainValTrajectoryBufferState[Experience]:
         """Flattens a batch to add items along single time axis."""
         batch_size, seq_len = utils.get_tree_shape_prefix(batch, n_axes=2)
         flattened_batch = jax.tree.map(
@@ -108,16 +108,15 @@ def create_item_buffer(
         )
 
     def sample_fn(
-        state: TrajectoryBufferState, rng_key: PRNGKey
+        state: TrainValTrajectoryBufferState, rng_key: PRNGKey
     ) -> TrajectoryBufferSample[Experience]:
         """Samples a batch of items from the buffer."""
-        indices = jnp.arange(len(state.experience))
         sampled_batch = buffer.sample(state, rng_key).experience
         sampled_batch = jax.tree.map(lambda x: x.squeeze(axis=1), sampled_batch)
         return TrajectoryBufferSample(experience=sampled_batch)
     
     def sample_train_fn(
-        state: TrajectoryBufferState, rng_key: PRNGKey
+        state: TrainValTrajectoryBufferState, rng_key: PRNGKey
     ) -> TrajectoryBufferSample[Experience]:
         """Samples a batch of items from the buffer."""
         sampled_batch = buffer.sample_train(state, rng_key).experience
@@ -125,7 +124,7 @@ def create_item_buffer(
         return TrajectoryBufferSample(experience=sampled_batch)
 
     def sample_val_fn(
-        state: TrajectoryBufferState, rng_key: PRNGKey
+        state: TrainValTrajectoryBufferState, rng_key: PRNGKey
     ) -> TrajectoryBufferSample[Experience]:
         """Samples a batch of items from the buffer."""
         sampled_batch = buffer.sample_val(state, rng_key).experience
