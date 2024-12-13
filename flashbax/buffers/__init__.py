@@ -21,3 +21,6 @@ from flashbax.buffers.prioritised_trajectory_buffer import (
 )
 from flashbax.buffers.trajectory_buffer import make_trajectory_buffer
 from flashbax.buffers.trajectory_queue import make_trajectory_queue
+
+from flashbax.buffers.train_val_item_buffer import make_train_val_item_buffer
+from flashbax.buffers.train_val_trajectory_buffer import make_train_val_trajectory_buffer

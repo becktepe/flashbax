@@ -24,6 +24,8 @@ from flashbax.buffers import (
     make_prioritised_trajectory_buffer,
     make_trajectory_buffer,
     make_trajectory_queue,
+    make_train_val_item_buffer,
+    make_train_val_trajectory_buffer,
     mixer,
     prioritised_flat_buffer,
     prioritised_item_buffer,

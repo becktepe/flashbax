@@ -34,12 +34,14 @@ import jax.numpy as jnp
 from jax import Array
 
 from flashbax import utils
+from sklearn.model_selection import train_test_split
+import numpy as np
 
 Experience = TypeVar("Experience", bound=chex.ArrayTree)
 
 
 @dataclass(frozen=True)
-class TrainValTrajectoryBufferState(Generic[Experience]):
+class TrajectoryBufferState(Generic[Experience]):
     """State of the  trajectory replay buffer.
 
     Attributes:
@@ -56,7 +58,6 @@ class TrainValTrajectoryBufferState(Generic[Experience]):
     train_indices: Array
     val_indices: Array
 
-
 @dataclass(frozen=True)
 class TrajectoryBufferSample(Generic[Experience]):
     """Container for samples from the buffer
@@ -72,8 +73,9 @@ def init(
     experience: Experience,
     add_batch_size: int,
     max_length_time_axis: int,
-    val_size: float
-) -> TrainValTrajectoryBufferState[Experience]:
+    val_size: float,
+    seed: int = 0
+) -> TrajectoryBufferState[Experience]:
     """
     Initialise the buffer state.
 
@@ -85,7 +87,7 @@ def init(
             `add_batch_size`.
         max_length_time_axis: Maximum length of the buffer along the time axis (second axis of the
             experience data).
-        val_size: Validation size.
+
     Returns:
         state: Initial state of the replay buffer. All values are empty as no experience has
             been added yet.
@@ -101,21 +103,29 @@ def init(
         experience,
     )
 
-    state = TrainValTrajectoryBufferState(
+    all_indices = np.arange(max_length_time_axis)
+    train_indices, val_indices = train_test_split(all_indices, test_size=val_size, random_state=seed)
+
+    train_indices = sorted(train_indices)
+    val_indices = sorted(val_indices)
+
+    train_indices = jnp.array(train_indices, dtype=int)
+    val_indices = jnp.array(val_indices, dtype=int)
+
+    state = TrajectoryBufferState(
         experience=experience,
         is_full=jnp.array(False, dtype=bool),
         current_index=jnp.array(0),
-        train_indices=jnp.full((add_batch_size * max_length_time_axis,), False, dtype=bool),
-        val_indices=jnp.full((add_batch_size * max_length_time_axis,), False, dtype=bool),
+        train_indices=train_indices,
+        val_indices=val_indices,
     )
     return state
 
 
 def add(
-    rng_key: chex.PRNGKey,
-    state: TrainValTrajectoryBufferState[Experience],
+    state: TrajectoryBufferState[Experience],
     batch: Experience,
-) -> TrainValTrajectoryBufferState[Experience]:
+) -> TrajectoryBufferState[Experience]:
     """
     Add a batch of experience to the buffer state. Assumes that this carries on from the episode
     where the previous added batch of experience ended. For example, if we consider a single
@@ -164,49 +174,17 @@ def add(
     is_full = state.is_full | (new_index >= max_length_time_axis)
     new_index = new_index % max_length_time_axis
 
-    # Generate all valid indices for the buffer
-    def full_buffer_case(_):
-        valid_indices = jnp.arange(max_length_time_axis)
-        return valid_indices
-
-    def not_full_buffer_case(_):
-        valid_indices = jnp.arange(state.current_index)
-        return valid_indices
-
-    # Compute valid indices based on whether the buffer is full
-    valid_indices = jax.lax.cond(
-        state.is_full,
-        full_buffer_case,
-        not_full_buffer_case,
-        operand=None  # No additional operand needed
-    )
-
-    # Shuffle valid indices
-    shuffled_indices = jax.random.permutation(rng_key, valid_indices)
-
-    # Compute the split point
-    train_size = int(rng_key * len(indices))
-    
-    # Split the indices
-    train_indices = shuffled_indices[:train_size]
-    val_indices = shuffled_indices[train_size:]
-
-    updated_train_indices = state.train_indices.at[train_indices].set(True)
-    updated_val_indices = state.val_indices.at[val_indices].set(True)
-
     state = state.replace(  # type: ignore
         experience=experience,
         current_index=new_index,
         is_full=is_full,
-        train_indices=updated_train_indices,
-        val_indices=updated_val_indices
     )
 
     return state
 
 
 def get_invalid_indices(
-    state: TrainValTrajectoryBufferState[Experience],
+    state: TrajectoryBufferState[Experience],
     sample_sequence_length: int,
     period: int,
     add_batch_size: int,
@@ -289,13 +267,14 @@ def get_invalid_indices(
 
 
 def calculate_uniform_item_indices(
-    state: TrainValTrajectoryBufferState[Experience],
+    state: TrajectoryBufferState[Experience],
     rng_key: chex.PRNGKey,
     batch_size: int,
     sample_sequence_length: int,
     period: int,
     add_batch_size: int,
     max_length_time_axis: int,
+    indices: jnp.ndarray
 ) -> Array:
     """Randomly sample a batch of item indices from the buffer state. This is done uniformly.
 
@@ -338,17 +317,17 @@ def calculate_uniform_item_indices(
     # or in the case of a full buffer, the size of one row of the item array.
     max_item_time_index = (max_data_time_index // period) + 1
 
-    # Get the indices of the items that will be invalid when sampling.
-    invalid_item_indices = get_invalid_indices(
-        state=state,
-        sample_sequence_length=sample_sequence_length,
-        period=period,
-        add_batch_size=add_batch_size,
-        max_length_time_axis=max_length_time_axis,
-    )
-    # Since all the invalid indices are repeated albeit with a batch offset,
-    # we can just take the first row of the invalid indices for calculation.
-    invalid_item_indices = invalid_item_indices[0]
+    # # Get the indices of the items that will be invalid when sampling.
+    # invalid_item_indices = get_invalid_indices(
+    #     state=state,
+    #     sample_sequence_length=sample_sequence_length,
+    #     period=period,
+    #     add_batch_size=add_batch_size,
+    #     max_length_time_axis=max_length_time_axis,
+    # )
+    # # Since all the invalid indices are repeated albeit with a batch offset,
+    # # we can just take the first row of the invalid indices for calculation.
+    # invalid_item_indices = invalid_item_indices[0]
 
     # We then get the upper bound of the item indices that we can sample from.
     # When being initially populated with data, the max time index will already account
@@ -357,22 +336,30 @@ def calculate_uniform_item_indices(
     # When the buffer is full, the max time index will not account for the items that cannot be
     # sampled meaning that we need to subtract the number of invalid items from the
     # max item index.
-    num_invalid_items = jnp.where(state.is_full, invalid_item_indices.shape[0], 0)
-    upper_bound = max_item_time_index - num_invalid_items
+    # num_invalid_items = jnp.where(state.is_full, invalid_item_indices.shape[0], 0)
+    # upper_bound = max_item_time_index - num_invalid_items
+    upper_bound = max_item_time_index
 
     # Since the invalid item indices are always consecutive (in a circular manner),
     # we can get the offset by taking the last item index and adding one.
-    time_offset = invalid_item_indices[-1] + 1
+    # time_offset = invalid_item_indices[-1] + 1
 
-    # We then sample a batch of item indices over the time axis.
-    sampled_item_time_indices = jax.random.randint(
-        rng_key, (batch_size,), 0, upper_bound
+    # For the train set, we consider all train indices < upper_bound
+    valid_indices = indices[indices < upper_bound]
+
+    # We then sample item indices 
+    sampled_item_time_indices = jax.random.choice(
+        rng_key, valid_indices, (batch_size,)
     )
+
     # We then add the offset and modulo the indices to ensure that they are within
     # the bounds of the item array (which doesnt actually exist). We modulo by the
     # max item index to ensure that we loop back to the start of the item array.
+    # sampled_item_time_indices = (
+    #     sampled_item_time_indices + time_offset
+    # ) % max_item_time_index
     sampled_item_time_indices = (
-        sampled_item_time_indices + time_offset
+        sampled_item_time_indices
     ) % max_item_time_index
 
     # We then get the batch indices by sampling a batch of indices over the batch axis.
@@ -391,7 +378,7 @@ def calculate_uniform_item_indices(
 
 
 def sample(
-    state: TrainValTrajectoryBufferState[Experience],
+    state: TrajectoryBufferState[Experience],
     rng_key: chex.PRNGKey,
     batch_size: int,
     sequence_length: int,
@@ -430,6 +417,7 @@ def sample(
         period,
         add_batch_size,
         max_length_time_axis,
+        indices=jnp.arange(max_length_time_axis)
     )
 
     # Convert the item indices to the indices of the data buffer
@@ -454,15 +442,162 @@ def sample(
     return TrajectoryBufferSample(experience=batch_trajectory)
 
 
+def sample_train(
+    state: TrajectoryBufferState[Experience],
+    rng_key: chex.PRNGKey,
+    batch_size: int,
+    sequence_length: int,
+    period: int,
+) -> TrajectoryBufferSample[Experience]:
+    """
+    Sample a batch of trajectories from the buffer.
+
+    Args:
+        state: The buffer's state.
+        rng_key: Random key.
+        batch_size: Batch size of sampled experience.
+        sequence_length: Length of trajectory to sample.
+        period: The period refers to the interval between sampled sequences. It serves to regulate
+            how much overlap there is between the trajectories that are sampled. To understand the
+            degree of overlap, you can calculate it as the difference between the
+            sample_sequence_length and the period. For instance, if you set period=1, it means that
+            trajectories will be sampled uniformly with the potential for any degree of overlap. On
+            the other hand, if period is equal to sample_sequence_length - 1, then trajectories can
+            be sampled in a way where only the first and last timesteps overlap with each other.
+            This helps you control the extent of overlap between consecutive sequences in your
+            sampling process.
+
+    Returns:
+        A batch of experience.
+    """
+    add_batch_size, max_length_time_axis = utils.get_tree_shape_prefix(
+        state.experience, n_axes=2
+    )
+    # Calculate the indices of the items that will be sampled.
+    item_indices = calculate_uniform_item_indices(
+        state,
+        rng_key,
+        batch_size,
+        sequence_length,
+        period,
+        add_batch_size,
+        max_length_time_axis,
+        indices=state.train_indices
+    )
+
+    # Convert the item indices to the indices of the data buffer
+    flat_data_indices = item_indices * period
+    # Get the batch index and time index of the sampled items.
+    batch_data_indices = flat_data_indices // max_length_time_axis
+    time_data_indices = flat_data_indices % max_length_time_axis
+
+    # The buffer is circular, so we can loop back to the start (`% max_length_time_axis`)
+    # if the time index is greater than the length. We then add the sequence length to get
+    # the end index of the sequence.
+    time_data_indices = (
+        jnp.arange(sequence_length) + time_data_indices[:, jnp.newaxis]
+    ) % max_length_time_axis
+
+    # Slice the experience in the buffer to get a batch of trajectories of length sequence_length
+    batch_trajectory = jax.tree_util.tree_map(
+        lambda x: x[batch_data_indices[:, jnp.newaxis], time_data_indices],
+        state.experience,
+    )
+
+    return TrajectoryBufferSample(experience=batch_trajectory)
+
+def sample_val(
+    state: TrajectoryBufferState[Experience],
+    rng_key: chex.PRNGKey,
+    batch_size: int,
+    sequence_length: int,
+    period: int,
+) -> TrajectoryBufferSample[Experience]:
+    """
+    Sample a batch of trajectories from the buffer.
+
+    Args:
+        state: The buffer's state.
+        rng_key: Random key.
+        batch_size: Batch size of sampled experience.
+        sequence_length: Length of trajectory to sample.
+        period: The period refers to the interval between sampled sequences. It serves to regulate
+            how much overlap there is between the trajectories that are sampled. To understand the
+            degree of overlap, you can calculate it as the difference between the
+            sample_sequence_length and the period. For instance, if you set period=1, it means that
+            trajectories will be sampled uniformly with the potential for any degree of overlap. On
+            the other hand, if period is equal to sample_sequence_length - 1, then trajectories can
+            be sampled in a way where only the first and last timesteps overlap with each other.
+            This helps you control the extent of overlap between consecutive sequences in your
+            sampling process.
+
+    Returns:
+        A batch of experience.
+    """
+    add_batch_size, max_length_time_axis = utils.get_tree_shape_prefix(
+        state.experience, n_axes=2
+    )
+    # Calculate the indices of the items that will be sampled.
+    item_indices = calculate_uniform_item_indices(
+        state,
+        rng_key,
+        batch_size,
+        sequence_length,
+        period,
+        add_batch_size,
+        max_length_time_axis,
+        indices=state.val_indices
+    )
+
+    # Convert the item indices to the indices of the data buffer
+    flat_data_indices = item_indices * period
+    # Get the batch index and time index of the sampled items.
+    batch_data_indices = flat_data_indices // max_length_time_axis
+    time_data_indices = flat_data_indices % max_length_time_axis
+
+    # The buffer is circular, so we can loop back to the start (`% max_length_time_axis`)
+    # if the time index is greater than the length. We then add the sequence length to get
+    # the end index of the sequence.
+    time_data_indices = (
+        jnp.arange(sequence_length) + time_data_indices[:, jnp.newaxis]
+    ) % max_length_time_axis
+
+    # Slice the experience in the buffer to get a batch of trajectories of length sequence_length
+    batch_trajectory = jax.tree_util.tree_map(
+        lambda x: x[batch_data_indices[:, jnp.newaxis], time_data_indices],
+        state.experience,
+    )
+
+    return TrajectoryBufferSample(experience=batch_trajectory)
+
 def can_sample(
-    state: TrainValTrajectoryBufferState[Experience], min_length_time_axis: int
+    state: TrajectoryBufferState[Experience], min_length_time_axis: int
 ) -> Array:
     """Indicates whether the buffer has been filled above the minimum length, such that it
     may be sampled from."""
     return state.is_full | (state.current_index >= min_length_time_axis)
 
 
-BufferState = TypeVar("BufferState", bound=TrainValTrajectoryBufferState)
+def can_sample_train(
+    state: TrajectoryBufferState[Experience], min_length_time_axis: int
+) -> Array:
+    """Indicates whether the buffer has been filled above the minimum length, such that it
+    may be sampled from."""
+    _can_sample_train = len(state.train_indices[state.train_indices <= state.current_index]) >= min_length_time_axis
+    
+    return state.is_full | _can_sample_train
+
+def can_sample_val(
+    state: TrajectoryBufferState[Experience], min_length_time_axis: int
+) -> Array:
+    """Indicates whether the buffer has been filled above the minimum length, such that it
+    may be sampled from."""
+    _can_sample_val = len(state.val_indices[state.val_indices <= state.current_index]) >= min_length_time_axis
+    
+    return state.is_full | _can_sample_val
+
+
+BufferState = TypeVar("BufferState", bound=TrajectoryBufferState)
 BufferSample = TypeVar("BufferSample", bound=TrajectoryBufferSample)
 
 
@@ -497,7 +632,17 @@ class TrainValTrajectoryBuffer(Generic[Experience, BufferState, BufferSample]):
         [BufferState, chex.PRNGKey],
         BufferSample,
     ]
+    sample_train: Callable[
+        [BufferState, chex.PRNGKey],
+        BufferSample,
+    ]
+    sample_val: Callable[
+        [BufferState, chex.PRNGKey],
+        BufferSample,
+    ]
     can_sample: Callable[[BufferState], Array]
+    can_sample_train: Callable[[BufferState], Array]
+    can_sample_val: Callable[[BufferState], Array]
 
 
 def validate_size(
@@ -566,7 +711,7 @@ def validate_trajectory_buffer_args(
             )
 
 
-def make_trajectory_buffer(
+def make_train_val_trajectory_buffer(
     add_batch_size: int,
     sample_batch_size: int,
     sample_sequence_length: int,
@@ -638,13 +783,37 @@ def make_trajectory_buffer(
         sequence_length=sample_sequence_length,
         period=period,
     )
+    sample_train_fn = functools.partial(
+        sample_train,
+        batch_size=sample_batch_size,
+        sequence_length=sample_sequence_length,
+        period=period,
+    )
+    sample_val_fn = functools.partial(
+        sample_val,
+        batch_size=sample_batch_size,
+        sequence_length=sample_sequence_length,
+        period=period,
+    )
     can_sample_fn = functools.partial(
         can_sample, min_length_time_axis=min_length_time_axis
+    )
+
+    can_sample_train_fn = functools.partial(
+        can_sample_train, min_length_time_axis=min_length_time_axis
+    )
+
+    can_sample_val_fn = functools.partial(
+        can_sample_val, min_length_time_axis=min_length_time_axis
     )
 
     return TrainValTrajectoryBuffer(
         init=init_fn,
         add=add_fn,
         sample=sample_fn,
+        sample_train=sample_train_fn,
+        sample_val=sample_val_fn,
         can_sample=can_sample_fn,
+        can_sample_train=can_sample_train_fn,
+        can_sample_val=can_sample_val_fn
     )
